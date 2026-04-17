@@ -29,10 +29,13 @@ def load_db():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
             for line in f:
+                if not line.strip(): continue
                 parts = line.strip().split("|")
                 if len(parts) >= 3:
                     country, emoji, numbers_str = parts[0], parts[1], parts[2]
-                    data[country] = {'emoji': emoji, 'numbers': numbers_str.split(',')}
+                    num_list = [n.strip() for n in numbers_str.split(',') if n.strip()]
+                    if num_list:
+                        data[country] = {'emoji': emoji, 'numbers': num_list}
     return data
 
 def save_db(data):
@@ -46,7 +49,7 @@ def save_db(data):
 def get_user_menu(db):
     markup = types.InlineKeyboardMarkup(row_width=2)
     buttons = [types.InlineKeyboardButton(f"{info['emoji']} {name}", callback_data=f"get_{name}") 
-               for name, info in db.items() if info['numbers']]
+               for name, info in db.items()]
     markup.add(*buttons)
     return markup
 
@@ -60,21 +63,47 @@ def get_number_layout(country):
     return markup
 
 # --- HANDLERS ---
+
+# Admin Panel Handler
 @bot.message_handler(commands=['start'])
 def start(message):
-    db = load_db()
     if message.from_user.id == ADMIN_ID:
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
             types.InlineKeyboardButton("➕ ADD NUMBERS", callback_data="add_num"),
             types.InlineKeyboardButton("🗑️ DELETE COUNTRY", callback_data="del_num")
         )
-        bot.send_message(message.chat.id, "🛠 **Admin Panel**", reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(message.chat.id, "🛠 **Admin Panel**\nWelcome Boss! Use buttons below to manage.", reply_markup=markup, parse_mode="Markdown")
     else:
-        if not db:
-            bot.send_message(message.chat.id, "❌ Stock empty!")
-        else:
-            bot.send_message(message.chat.id, "✨ **Select Country**", reply_markup=get_user_menu(db))
+        # User-er jonno start dileo menu asbe
+        main_menu_display(message)
+
+# User /cap Command
+@bot.message_handler(commands=['cap'])
+def cap_command(message):
+    db = load_db()
+    if not db:
+        bot.send_message(message.chat.id, "❌ Stock empty!")
+        return
+    
+    grand_total = sum(len(info['numbers']) for info in db.values())
+    text = "🌍 **Available Countries:**\n\n"
+    
+    for country, info in db.items():
+        count = len(info['numbers'])
+        text += f"   {info['emoji']} {country} → {count} numbers\n"
+        text += f"   └─ Total: {count} numbers\n\n"
+    
+    text += f"📊 **Grand Total: {grand_total} numbers available**"
+    
+    bot.send_message(message.chat.id, text, reply_markup=get_user_menu(db), parse_mode="Markdown")
+
+def main_menu_display(message):
+    db = load_db()
+    if not db:
+        bot.send_message(message.chat.id, "❌ Stock is currently empty!")
+    else:
+        bot.send_message(message.chat.id, "✨ **Select a Country**", reply_markup=get_user_menu(db))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("get_"))
 def show_numbers(call):
@@ -82,10 +111,11 @@ def show_numbers(call):
     db = load_db()
     if country in db and db[country]['numbers']:
         emoji = db[country]['emoji']
+        # Number sample neya hocche kintu remove kora hocche na jate finish na hoy
         selected_nums = random.sample(db[country]['numbers'], min(len(db[country]['numbers']), 2))
         
         msg_text = f"📍 **Country:** {country} {emoji}\n\n"
-        msg_text += "👇 **Click to copy:**\n\n"
+        msg_text += "👇 **Click on the number to copy:**\n\n"
         for n in selected_nums:
             msg_text += f"📋 `{n}`\n\n"
             
@@ -93,31 +123,31 @@ def show_numbers(call):
                               reply_markup=get_number_layout(country), 
                               parse_mode="Markdown")
     else:
-        bot.answer_callback_query(call.id, "⚠️ Out of stock!")
+        bot.answer_callback_query(call.id, "⚠️ Out of stock for this country!", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu")
 def back_home(call):
     db = load_db()
-    bot.edit_message_text("✨ **Select Country**", call.message.chat.id, call.message.message_id, 
+    bot.edit_message_text("✨ **Select a Country**", call.message.chat.id, call.message.message_id, 
                           reply_markup=get_user_menu(db))
 
-# --- ADMIN PROCESS (ADD) ---
+# --- ADMIN LOGIC ---
 @bot.callback_query_handler(func=lambda call: call.data == "add_num")
 def admin_add(call):
-    msg = bot.send_message(call.message.chat.id, "Enter Country Name:")
-    bot.register_next_step_handler(msg, step_emoji)
+    msg = bot.send_message(call.message.chat.id, "⌨️ Enter Country Name (Example: Saudi 2):")
+    bot.register_next_step_handler(msg, process_country_name)
 
-def step_emoji(message):
+def process_country_name(message):
     country = message.text
-    msg = bot.send_message(message.chat.id, f"Emoji for {country}:")
-    bot.register_next_step_handler(msg, step_final, country)
+    msg = bot.send_message(message.chat.id, f"🎨 Enter Emoji for {country}:")
+    bot.register_next_step_handler(msg, process_emoji, country)
 
-def step_final(message, country):
+def process_emoji(message, country):
     emoji = message.text
-    msg = bot.send_message(message.chat.id, "Send TXT or Paste Numbers:")
-    bot.register_next_step_handler(msg, process_numbers, country, emoji)
+    msg = bot.send_message(message.chat.id, "📄 Send TXT file or Paste Numbers:")
+    bot.register_next_step_handler(msg, process_final, country, emoji)
 
-def process_numbers(message, country, emoji):
+def process_final(message, country, emoji):
     nums = []
     if message.content_type == 'document':
         raw = bot.download_file(bot.get_file(message.document.file_id).file_path).decode('utf-8')
@@ -127,43 +157,32 @@ def process_numbers(message, country, emoji):
     
     if nums:
         db = load_db()
-        if country in db: db[country]['numbers'].extend(nums)
-        else: db[country] = {'emoji': emoji, 'numbers': nums}
+        if country in db:
+            db[country]['numbers'].extend(nums)
+        else:
+            db[country] = {'emoji': emoji, 'numbers': nums}
         save_db(db)
-        bot.send_message(message.chat.id, f"✅ Added {len(nums)} numbers to {country}!")
+        bot.send_message(message.chat.id, f"✅ Added {len(nums)} numbers! Total in {country}: {len(db[country]['numbers'])}")
 
-# --- ADMIN PROCESS (DELETE FIX) ---
 @bot.callback_query_handler(func=lambda call: call.data == "del_num")
 def admin_del_menu(call):
     db = load_db()
-    if not db:
-        bot.answer_callback_query(call.id, "No countries to delete!")
-        return
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup = types.InlineKeyboardMarkup()
     for n in db.keys():
-        markup.add(types.InlineKeyboardButton(f"❌ {n}", callback_data=f"confirm_del_{n}"))
-    
-    bot.edit_message_text("🗑️ Select a country to **DELETE** permanently:", 
-                          call.message.chat.id, call.message.message_id, 
-                          reply_markup=markup, parse_mode="Markdown")
+        markup.add(types.InlineKeyboardButton(f"❌ {n}", callback_data=f"del_{n}"))
+    bot.send_message(call.message.chat.id, "🗑️ Select country to delete:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_del_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("del_"))
 def handle_del(call):
-    country_to_del = call.data.replace("confirm_del_", "")
+    c = call.data.replace("del_", "")
     db = load_db()
-    
-    if country_to_del in db:
-        del db[country_to_del]
+    if c in db:
+        del db[c]
         save_db(db)
-        bot.answer_callback_query(call.id, f"Deleted {country_to_del} successfully!")
-        # Back to Admin Panel
-        start(call.message)
-    else:
-        bot.answer_callback_query(call.id, "Error: Country not found.")
+        bot.send_message(call.message.chat.id, f"🗑️ Deleted {c}.")
 
-# --- START BOT ---
+# --- START BOT & SERVER ---
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
+    print("Bot is Starting...")
     bot.infinity_polling()
-    
