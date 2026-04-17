@@ -3,6 +3,7 @@ from telebot import types
 import os
 import random
 import threading
+import time
 from flask import Flask
 
 # --- CONFIG ---
@@ -13,6 +14,10 @@ DB_FILE = "numbers_db.txt"
 
 bot = telebot.TeleBot(API_TOKEN)
 app = Flask(__name__)
+
+# --- GLOBAL VARIABLES ---
+REFRESH_COOLDOWN = 5  # Default 5 seconds
+last_refresh_time = {}
 
 # --- WEB SERVER FOR RENDER ---
 @app.route('/')
@@ -64,21 +69,20 @@ def get_number_layout(country):
 
 # --- HANDLERS ---
 
-# Admin Panel Handler
 @bot.message_handler(commands=['start'])
 def start(message):
     if message.from_user.id == ADMIN_ID:
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
             types.InlineKeyboardButton("➕ ADD NUMBERS", callback_data="add_num"),
-            types.InlineKeyboardButton("🗑️ DELETE COUNTRY", callback_data="del_num")
+            types.InlineKeyboardButton("🗑️ DELETE COUNTRY", callback_data="del_num"),
+            types.InlineKeyboardButton("⏳ SET REFRESH TIMER", callback_data="set_timer")
         )
-        bot.send_message(message.chat.id, "🛠 **Admin Panel**\nWelcome Boss! Use buttons below to manage.", reply_markup=markup, parse_mode="Markdown")
+        bot.send_message(message.chat.id, "🛠 **Admin Panel**", reply_markup=markup, parse_mode="Markdown")
     else:
-        # User-er jonno start dileo menu asbe
-        main_menu_display(message)
+        db = load_db()
+        bot.send_message(message.chat.id, "✨ **Select a Country**", reply_markup=get_user_menu(db))
 
-# User /cap Command
 @bot.message_handler(commands=['cap'])
 def cap_command(message):
     db = load_db()
@@ -88,42 +92,47 @@ def cap_command(message):
     
     grand_total = sum(len(info['numbers']) for info in db.values())
     text = "🌍 **Available Countries:**\n\n"
-    
     for country, info in db.items():
         count = len(info['numbers'])
         text += f"   {info['emoji']} {country} → {count} numbers\n"
-        text += f"   └─ Total: {count} numbers\n\n"
-    
-    text += f"📊 **Grand Total: {grand_total} numbers available**"
-    
+    text += f"\n📊 **Grand Total: {grand_total} numbers available**"
     bot.send_message(message.chat.id, text, reply_markup=get_user_menu(db), parse_mode="Markdown")
-
-def main_menu_display(message):
-    db = load_db()
-    if not db:
-        bot.send_message(message.chat.id, "❌ Stock is currently empty!")
-    else:
-        bot.send_message(message.chat.id, "✨ **Select a Country**", reply_markup=get_user_menu(db))
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("get_"))
 def show_numbers(call):
+    user_id = call.from_user.id
+    current_time = time.time()
+    
+    # Timer Check
+    if user_id in last_refresh_time:
+        elapsed = current_time - last_refresh_time[user_id]
+        if elapsed < REFRESH_COOLDOWN:
+            wait_time = int(REFRESH_COOLDOWN - elapsed)
+            bot.answer_callback_query(call.id, f"⏳ Wait {wait_time}s before refresh!", show_alert=True)
+            return
+
     country = call.data.replace("get_", "")
     db = load_db()
+    
     if country in db and db[country]['numbers']:
-        emoji = db[country]['emoji']
-        # Number sample neya hocche kintu remove kora hocche na jate finish na hoy
-        selected_nums = random.sample(db[country]['numbers'], min(len(db[country]['numbers']), 2))
+        # Ekta number random select kora ebong remove kora
+        num = random.choice(db[country]['numbers'])
+        db[country]['numbers'].remove(num)
+        save_db(db) # Database update (permanent removal)
         
+        last_refresh_time[user_id] = current_time # Timer update
+        
+        emoji = db[country]['emoji']
         msg_text = f"📍 **Country:** {country} {emoji}\n\n"
         msg_text += "👇 **Click on the number to copy:**\n\n"
-        for n in selected_nums:
-            msg_text += f"📋 `{n}`\n\n"
+        msg_text += f"📋 `{num}`\n\n"
+        msg_text += f"⚠️ *This number is removed from stock and won't be shown again.*"
             
         bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, 
                               reply_markup=get_number_layout(country), 
                               parse_mode="Markdown")
     else:
-        bot.answer_callback_query(call.id, "⚠️ Out of stock for this country!", show_alert=True)
+        bot.answer_callback_query(call.id, "⚠️ No more numbers left in stock!", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu")
 def back_home(call):
@@ -131,23 +140,32 @@ def back_home(call):
     bot.edit_message_text("✨ **Select a Country**", call.message.chat.id, call.message.message_id, 
                           reply_markup=get_user_menu(db))
 
-# --- ADMIN LOGIC ---
+# --- ADMIN PROCESS ---
+
+@bot.callback_query_handler(func=lambda call: call.data == "set_timer")
+def admin_timer(call):
+    msg = bot.send_message(call.message.chat.id, "⏱ **Enter timer in seconds (e.g., 5):**")
+    bot.register_next_step_handler(msg, process_timer)
+
+def process_timer(message):
+    global REFRESH_COOLDOWN
+    try:
+        REFRESH_COOLDOWN = int(message.text)
+        bot.send_message(message.chat.id, f"✅ Refresh Timer set to **{REFRESH_COOLDOWN} seconds**.")
+    except:
+        bot.send_message(message.chat.id, "❌ Invalid number. Please enter only digits.")
+
 @bot.callback_query_handler(func=lambda call: call.data == "add_num")
 def admin_add(call):
-    msg = bot.send_message(call.message.chat.id, "⌨️ Enter Country Name (Example: Saudi 2):")
-    bot.register_next_step_handler(msg, process_country_name)
+    msg = bot.send_message(call.message.chat.id, "⌨️ Country Name:")
+    bot.register_next_step_handler(msg, lambda m: bot.register_next_step_handler(bot.send_message(m.chat.id, "Emoji:"), step_final, m.text))
 
-def process_country_name(message):
-    country = message.text
-    msg = bot.send_message(message.chat.id, f"🎨 Enter Emoji for {country}:")
-    bot.register_next_step_handler(msg, process_emoji, country)
-
-def process_emoji(message, country):
+def step_final(message, country):
     emoji = message.text
-    msg = bot.send_message(message.chat.id, "📄 Send TXT file or Paste Numbers:")
-    bot.register_next_step_handler(msg, process_final, country, emoji)
+    msg = bot.send_message(message.chat.id, "Send TXT or Paste Numbers:")
+    bot.register_next_step_handler(msg, process_numbers, country, emoji)
 
-def process_final(message, country, emoji):
+def process_numbers(message, country, emoji):
     nums = []
     if message.content_type == 'document':
         raw = bot.download_file(bot.get_file(message.document.file_id).file_path).decode('utf-8')
@@ -157,20 +175,17 @@ def process_final(message, country, emoji):
     
     if nums:
         db = load_db()
-        if country in db:
-            db[country]['numbers'].extend(nums)
-        else:
-            db[country] = {'emoji': emoji, 'numbers': nums}
+        if country in db: db[country]['numbers'].extend(nums)
+        else: db[country] = {'emoji': emoji, 'numbers': nums}
         save_db(db)
-        bot.send_message(message.chat.id, f"✅ Added {len(nums)} numbers! Total in {country}: {len(db[country]['numbers'])}")
+        bot.send_message(message.chat.id, f"✅ Added {len(nums)} numbers!")
 
 @bot.callback_query_handler(func=lambda call: call.data == "del_num")
 def admin_del_menu(call):
     db = load_db()
     markup = types.InlineKeyboardMarkup()
-    for n in db.keys():
-        markup.add(types.InlineKeyboardButton(f"❌ {n}", callback_data=f"del_{n}"))
-    bot.send_message(call.message.chat.id, "🗑️ Select country to delete:", reply_markup=markup)
+    for n in db.keys(): markup.add(types.InlineKeyboardButton(f"❌ {n}", callback_data=f"del_{n}"))
+    bot.send_message(call.message.chat.id, "Select country to delete:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("del_"))
 def handle_del(call):
@@ -181,8 +196,7 @@ def handle_del(call):
         save_db(db)
         bot.send_message(call.message.chat.id, f"🗑️ Deleted {c}.")
 
-# --- START BOT & SERVER ---
+# --- START ---
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
-    print("Bot is Starting...")
     bot.infinity_polling()
