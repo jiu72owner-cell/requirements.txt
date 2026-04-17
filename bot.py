@@ -14,13 +14,12 @@ DB_FILE = "numbers_db.txt"
 bot = telebot.TeleBot(API_TOKEN)
 app = Flask(__name__)
 
-# --- WEB SERVER FOR RENDER (Port fix) ---
+# --- WEB SERVER FOR RENDER ---
 @app.route('/')
 def index():
     return "Bot is Running 24/7!"
 
 def run_flask():
-    # Render automatic PORT environment variable dey
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
 
@@ -102,7 +101,7 @@ def back_home(call):
     bot.edit_message_text("✨ **Select Country**", call.message.chat.id, call.message.message_id, 
                           reply_markup=get_user_menu(db))
 
-# --- ADMIN PROCESS ---
+# --- ADMIN PROCESS (ADD) ---
 @bot.callback_query_handler(func=lambda call: call.data == "add_num")
 def admin_add(call):
     msg = bot.send_message(call.message.chat.id, "Enter Country Name:")
@@ -131,9 +130,40 @@ def process_numbers(message, country, emoji):
         if country in db: db[country]['numbers'].extend(nums)
         else: db[country] = {'emoji': emoji, 'numbers': nums}
         save_db(db)
-        bot.send_message(message.chat.id, f"✅ Added {len(nums)} numbers!")
+        bot.send_message(message.chat.id, f"✅ Added {len(nums)} numbers to {country}!")
+
+# --- ADMIN PROCESS (DELETE FIX) ---
+@bot.callback_query_handler(func=lambda call: call.data == "del_num")
+def admin_del_menu(call):
+    db = load_db()
+    if not db:
+        bot.answer_callback_query(call.id, "No countries to delete!")
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for n in db.keys():
+        markup.add(types.InlineKeyboardButton(f"❌ {n}", callback_data=f"confirm_del_{n}"))
+    
+    bot.edit_message_text("🗑️ Select a country to **DELETE** permanently:", 
+                          call.message.chat.id, call.message.message_id, 
+                          reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_del_"))
+def handle_del(call):
+    country_to_del = call.data.replace("confirm_del_", "")
+    db = load_db()
+    
+    if country_to_del in db:
+        del db[country_to_del]
+        save_db(db)
+        bot.answer_callback_query(call.id, f"Deleted {country_to_del} successfully!")
+        # Back to Admin Panel
+        start(call.message)
+    else:
+        bot.answer_callback_query(call.id, "Error: Country not found.")
 
 # --- START BOT ---
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
     bot.infinity_polling()
+    
