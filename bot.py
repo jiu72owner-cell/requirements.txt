@@ -27,7 +27,7 @@ client = TelegramClient('otp_session', API_ID, API_HASH)
 # --- GLOBAL VARIABLES ---
 REFRESH_COOLDOWN = 5
 last_refresh_time = {}
-user_active_numbers = {} # { "last_4_digits": user_id }
+user_active_numbers = {} 
 
 # --- WEB SERVER FOR RENDER ---
 @app.route('/')
@@ -103,6 +103,12 @@ def cap_command(message):
     text += f"\n📊 **Grand Total: {grand_total} numbers available**"
     bot.send_message(message.chat.id, text, reply_markup=get_user_menu(db), parse_mode="Markdown")
 
+@bot.callback_query_handler(func=lambda call: call.data == "main_menu")
+def back_home(call):
+    db = load_db()
+    bot.edit_message_text("✨ **Select a Country**", call.message.chat.id, call.message.message_id, 
+                          reply_markup=get_user_menu(db))
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("get_"))
 def show_numbers(call):
     user_id = call.from_user.id
@@ -129,7 +135,7 @@ def show_numbers(call):
     else:
         bot.answer_callback_query(call.id, "⚠️ Out of stock!", show_alert=True)
 
-# --- OTP MATCHING LOGIC ---
+# --- OTP MATCHING ---
 @client.on(events.NewMessage(chats=SOURCE_GROUP_ID))
 async def otp_listener(event):
     msg_text = event.message.message
@@ -156,26 +162,32 @@ def process_timer(message):
     global REFRESH_COOLDOWN
     try:
         REFRESH_COOLDOWN = int(message.text)
-        bot.send_message(message.chat.id, f"✅ Timer: {REFRESH_COOLDOWN}s")
+        bot.send_message(message.chat.id, f"✅ Timer set to {REFRESH_COOLDOWN}s")
     except: bot.send_message(message.chat.id, "❌ Error")
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_num")
-def admin_add(call):
-    msg = bot.send_message(call.message.chat.id, "Country Name:")
-    bot.register_next_step_handler(msg, process_country_name)
+def admin_add_start(call):
+    msg = bot.send_message(call.message.chat.id, "⌨️ Country Name:")
+    bot.register_next_step_handler(msg, admin_add_emoji)
 
-def process_country_name(message):
+def admin_add_emoji(message):
     country = message.text
-    msg = bot.send_message(message.chat.id, f"Emoji for {country}:")
-    bot.register_next_step_handler(msg, process_emoji, country)
+    msg = bot.send_message(message.chat.id, f"🎨 Emoji for {country}:")
+    bot.register_next_step_handler(msg, admin_add_numbers, country)
 
-def process_emoji(message, country):
+def admin_add_numbers(message, country):
     emoji = message.text
-    msg = bot.send_message(message.chat.id, "Paste Numbers:")
-    bot.register_next_step_handler(msg, process_numbers, country, emoji)
+    msg = bot.send_message(message.chat.id, "📄 Send TXT or Paste Numbers:")
+    bot.register_next_step_handler(msg, admin_final_save, country, emoji)
 
-def process_numbers(message, country, emoji):
-    nums = [l.strip() for l in message.text.splitlines() if l.strip()] if message.text else []
+def admin_final_save(message, country, emoji):
+    nums = []
+    if message.content_type == 'document':
+        raw = bot.download_file(bot.get_file(message.document.file_id).file_path).decode('utf-8')
+        nums = [l.strip() for l in raw.splitlines() if l.strip()]
+    elif message.text:
+        nums = [l.strip() for l in message.text.splitlines() if l.strip()]
+    
     if nums:
         db = load_db()
         if country in db: db[country]['numbers'].extend(nums)
@@ -204,3 +216,4 @@ if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
     threading.Thread(target=run_telethon).start()
     bot.infinity_polling()
+    
