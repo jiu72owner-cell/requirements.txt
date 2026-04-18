@@ -1,12 +1,9 @@
 import telebot
 from telebot import types
-from telethon import TelegramClient, events
 import os
 import random
 import threading
 import time
-import re
-import asyncio
 from flask import Flask
 
 # --- CONFIG ---
@@ -15,20 +12,12 @@ ADMIN_ID = 7776219392
 OTP_LINK = "https://t.me/sfcoreoay"
 DB_FILE = "numbers_db.txt"
 
-# Telethon Config (User-bot for reading group OTP)
-API_ID = 39835485
-API_HASH = '43b51f3817ef1aaa81141ad974535f0c'
-SOURCE_GROUP_ID = -1002143431325 # <--- OTP Group ID
-
 bot = telebot.TeleBot(API_TOKEN)
 app = Flask(__name__)
-client = TelegramClient('otp_session', API_ID, API_HASH)
 
 # --- GLOBAL VARIABLES ---
-REFRESH_COOLDOWN = 5
+REFRESH_COOLDOWN = 5  # Default 5 seconds
 last_refresh_time = {}
-# Matching User ID with their assigned number's last 4 digits
-user_active_numbers = {} 
 
 # --- WEB SERVER FOR RENDER ---
 @app.route('/')
@@ -100,10 +89,12 @@ def cap_command(message):
     if not db:
         bot.send_message(message.chat.id, "❌ Stock empty!")
         return
+    
     grand_total = sum(len(info['numbers']) for info in db.values())
     text = "🌍 **Available Countries:**\n\n"
     for country, info in db.items():
-        text += f"   {info['emoji']} {country} → {len(info['numbers'])} numbers\n"
+        count = len(info['numbers'])
+        text += f"   {info['emoji']} {country} → {count} numbers\n"
     text += f"\n📊 **Grand Total: {grand_total} numbers available**"
     bot.send_message(message.chat.id, text, reply_markup=get_user_menu(db), parse_mode="Markdown")
 
@@ -113,8 +104,10 @@ def show_numbers(call):
     current_time = time.time()
     
     if user_id in last_refresh_time:
-        if current_time - last_refresh_time[user_id] < REFRESH_COOLDOWN:
-            bot.answer_callback_query(call.id, f"⏳ Wait {int(REFRESH_COOLDOWN - (current_time - last_refresh_time[user_id]))}s!", show_alert=True)
+        elapsed = current_time - last_refresh_time[user_id]
+        if elapsed < REFRESH_COOLDOWN:
+            wait_time = int(REFRESH_COOLDOWN - elapsed)
+            bot.answer_callback_query(call.id, f"⏳ Wait {wait_time}s before refresh!", show_alert=True)
             return
 
     country = call.data.replace("get_", "")
@@ -125,16 +118,19 @@ def show_numbers(call):
         db[country]['numbers'].remove(num)
         save_db(db)
         
-        # Mapping last 4 digits to the user
-        last_4 = num[-4:]
-        user_active_numbers[last_4] = user_id
-        
         last_refresh_time[user_id] = current_time
-        msg_text = f"📍 **Country:** {country} {db[country]['emoji']}\n\n📋 `{num}`\n\n⚠️ *This number is auto-removed. I will alert you if OTP arrives.*"
+        
+        emoji = db[country]['emoji']
+        msg_text = f"📍 **Country:** {country} {emoji}\n\n"
+        msg_text += "👇 **Click on the number to copy:**\n\n"
+        msg_text += f"📋 `{num}`\n\n"
+        msg_text += f"⚠️ *This number is removed from stock and won't be shown again.*"
+            
         bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, 
-                              reply_markup=get_number_layout(country), parse_mode="Markdown")
+                              reply_markup=get_number_layout(country), 
+                              parse_mode="Markdown")
     else:
-        bot.answer_callback_query(call.id, "⚠️ Out of stock!", show_alert=True)
+        bot.answer_callback_query(call.id, "⚠️ No more numbers left in stock!", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data == "main_menu")
 def back_home(call):
@@ -142,45 +138,34 @@ def back_home(call):
     bot.edit_message_text("✨ **Select a Country**", call.message.chat.id, call.message.message_id, 
                           reply_markup=get_user_menu(db))
 
-# --- OTP MATCHING LOGIC (Telethon) ---
-@client.on(events.NewMessage(chats=SOURCE_GROUP_ID))
-async def otp_listener(event):
-    msg_text = event.message.message
-    # Check for last 4 digits in the message text
-    match = re.search(r'(\d{4})', msg_text)
-    if match:
-        last_4_found = match.group(1)
-        if last_4_found in user_active_numbers:
-            target_user = user_active_numbers[last_4_found]
-            bot.send_message(target_user, "🔔 **OTP Received!** Check the group now.", parse_mode="Markdown")
+# --- ADMIN PROCESS ---
 
-def run_telethon():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    client.start()
-    client.run_until_disconnected()
-
-# --- ADMIN LOGIC ---
 @bot.callback_query_handler(func=lambda call: call.data == "set_timer")
 def admin_timer(call):
-    msg = bot.send_message(call.message.chat.id, "⏱ **Enter timer in seconds:**")
+    msg = bot.send_message(call.message.chat.id, "⏱ **Enter timer in seconds (e.g., 5):**")
     bot.register_next_step_handler(msg, process_timer)
 
 def process_timer(message):
     global REFRESH_COOLDOWN
     try:
         REFRESH_COOLDOWN = int(message.text)
-        bot.send_message(message.chat.id, f"✅ Refresh Timer set to {REFRESH_COOLDOWN}s")
-    except: bot.send_message(message.chat.id, "❌ Error: Digits only.")
+        bot.send_message(message.chat.id, f"✅ Refresh Timer set to **{REFRESH_COOLDOWN} seconds**.")
+    except:
+        bot.send_message(message.chat.id, "❌ Invalid number. Please enter only digits.")
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_num")
 def admin_add(call):
-    msg = bot.send_message(call.message.chat.id, "Country Name:")
-    bot.register_next_step_handler(msg, lambda m: bot.register_next_step_handler(bot.send_message(m.chat.id, "Emoji:"), step_final, m.text))
+    msg = bot.send_message(call.message.chat.id, "⌨️ Country Name:")
+    bot.register_next_step_handler(msg, process_country_name)
 
-def step_final(message, country):
+def process_country_name(message):
+    country = message.text
+    msg = bot.send_message(message.chat.id, f"🎨 Emoji for {country}:")
+    bot.register_next_step_handler(msg, process_emoji, country)
+
+def process_emoji(message, country):
     emoji = message.text
-    msg = bot.send_message(message.chat.id, "Send TXT or Paste Numbers:")
+    msg = bot.send_message(message.chat.id, "📄 Send TXT or Paste Numbers:")
     bot.register_next_step_handler(msg, process_numbers, country, emoji)
 
 def process_numbers(message, country, emoji):
@@ -214,9 +199,7 @@ def handle_del(call):
         save_db(db)
         bot.send_message(call.message.chat.id, f"🗑️ Deleted {c}.")
 
-# --- START BOTH ---
+# --- START ---
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
-    threading.Thread(target=run_telethon).start()
-    print("Bot is Starting...")
     bot.infinity_polling()
