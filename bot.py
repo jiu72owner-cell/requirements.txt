@@ -126,6 +126,7 @@ def show_numbers(call):
         db[country]['numbers'].remove(num)
         save_db(db)
         
+        # Sesh 4 digit user matching er jonno save kora
         last_4 = num[-4:]
         user_active_numbers[last_4] = user_id
         
@@ -135,16 +136,18 @@ def show_numbers(call):
     else:
         bot.answer_callback_query(call.id, "⚠️ Out of stock!", show_alert=True)
 
-# --- OTP MATCHING ---
+# --- OTP MATCHING LOGIC ---
 @client.on(events.NewMessage(chats=SOURCE_GROUP_ID))
 async def otp_listener(event):
     msg_text = event.message.message
-    match = re.search(r'(\d{4})', msg_text)
-    if match:
-        last_4_in_msg = match.group(1)
+    # Regex ekhon message-er moddhe last 4 digits aro nikhutvabe khujbe
+    matches = re.findall(r'\d{4}', msg_text)
+    
+    for last_4_in_msg in matches:
         if last_4_in_msg in user_active_numbers:
             target_user = user_active_numbers[last_4_in_msg]
             bot.send_message(target_user, "OTP received 🔥", parse_mode="Markdown")
+            break
 
 def run_telethon():
     loop = asyncio.new_event_loop()
@@ -211,9 +214,8 @@ def handle_del(call):
         save_db(db)
         bot.send_message(call.message.chat.id, f"🗑️ Deleted {c}.")
 
-# --- START ---
+# --- START BOTH ---
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
     threading.Thread(target=run_telethon).start()
     bot.infinity_polling()
-    
